@@ -267,6 +267,7 @@ impl KeyboardHandler for App {
         let up_keysym = Keysym::from(xkeysym::key::Up);
         let down_keysym = Keysym::from(xkeysym::key::Down);
         let enter_keysym = Keysym::from(xkeysym::key::Return);
+        let backspace_keysym = Keysym::from(xkeysym::key::BackSpace);
 
         if event.keysym == escape_keysym {
             self.exit = true;
@@ -279,6 +280,15 @@ impl KeyboardHandler for App {
         } else if event.keysym == enter_keysym {
             self.window_switcher_state.activate();
             self.exit = true;
+        } else if event.keysym == backspace_keysym {
+            self.window_switcher_state.backspace();
+            self.draw(qh);
+        } else if let Some(text) = event.utf8 {
+            // Filter control strings or empty strings
+            if !text.chars().any(|c| c.is_control()) {
+                self.window_switcher_state.input_text(&text);
+                self.draw(qh);
+            }
         }
     }
     fn release_key(
@@ -354,11 +364,34 @@ impl App {
                 None,
             );
 
-            let windows = &self.window_switcher_state.windows;
-            let selection = self.window_switcher_state.selection_index;
-            let mut y = 10.0;
+            // Draw search query
+            draw_text_pixel(
+                &mut pixmap,
+                &self.font,
+                10.0,
+                10.0,
+                &format!("Search: {}", self.window_switcher_state.query),
+                tiny_skia::Color::WHITE,
+            );
 
-            for (i, win) in windows.iter().enumerate() {
+            let selection = self.window_switcher_state.selection_index;
+            // Draw below search bar
+            let mut y = 50.0;
+
+            // Iterate over filtered windows
+            for (i, &win_idx) in self
+                .window_switcher_state
+                .filtered_windows
+                .iter()
+                .enumerate()
+            {
+                // Limit number of items drawn to fit screen
+                if y > height as f32 - 30.0 {
+                    break;
+                }
+
+                let win = &self.window_switcher_state.windows[win_idx];
+
                 let is_selected = i == selection;
                 let rect_color = if is_selected {
                     tiny_skia::Color::from_rgba8(60, 100, 160, 255)

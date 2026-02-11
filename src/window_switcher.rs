@@ -1,3 +1,5 @@
+use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use serde::Deserialize;
 use std::process::Command;
 
@@ -13,14 +15,20 @@ pub struct GnomeWindow {
 
 pub struct WindowSwitcherState {
     pub windows: Vec<GnomeWindow>,
-    pub selection_index: usize,
+    pub filtered_windows: Vec<usize>, // Indices into windows
+    pub selection_index: usize,       // Index into filtered_windows
+    pub query: String,
+    matcher: SkimMatcherV2,
 }
 
 impl WindowSwitcherState {
     pub fn new() -> Self {
         Self {
             windows: Vec::new(),
+            filtered_windows: Vec::new(),
             selection_index: 0,
+            query: String::new(),
+            matcher: SkimMatcherV2::default(),
         }
     }
 
@@ -30,17 +38,51 @@ impl WindowSwitcherState {
             Vec::new()
         });
         eprintln!("[DEBUG] Found {} windows", self.windows.len());
-        // Reset selection if out of bounds or empty
-        if self.selection_index >= self.windows.len() {
-            self.selection_index = 0;
+        self.filter();
+    }
+
+    pub fn filter(&mut self) {
+        if self.query.is_empty() {
+            self.filtered_windows = (0..self.windows.len()).collect();
+        } else {
+            let mut matches: Vec<(i64, usize)> = self
+                .windows
+                .iter()
+                .enumerate()
+                .filter_map(|(i, win)| {
+                    // Search against title and class
+                    let text = format!("{} {}", win.wm_class, win.title);
+                    self.matcher
+                        .fuzzy_match(&text, &self.query)
+                        .map(|score| (score, i))
+                })
+                .collect();
+
+            // Sort by score descending
+            matches.sort_by(|a, b| b.0.cmp(&a.0));
+
+            self.filtered_windows = matches.into_iter().map(|(_, i)| i).collect();
         }
+
+        // Reset selection
+        self.selection_index = 0;
+    }
+
+    pub fn input_text(&mut self, text: &str) {
+        self.query.push_str(text);
+        self.filter();
+    }
+
+    pub fn backspace(&mut self) {
+        self.query.pop();
+        self.filter();
     }
 
     pub fn next(&mut self) {
-        if self.windows.is_empty() {
+        if self.filtered_windows.is_empty() {
             return;
         }
-        if self.selection_index + 1 < self.windows.len() {
+        if self.selection_index + 1 < self.filtered_windows.len() {
             self.selection_index += 1;
         } else {
             self.selection_index = 0; // Wrap around
@@ -48,25 +90,29 @@ impl WindowSwitcherState {
     }
 
     pub fn prev(&mut self) {
-        if self.windows.is_empty() {
+        if self.filtered_windows.is_empty() {
             return;
         }
         if self.selection_index > 0 {
             self.selection_index -= 1;
         } else {
-            self.selection_index = self.windows.len() - 1; // Wrap around
+            self.selection_index = self.filtered_windows.len() - 1; // Wrap around
         }
     }
 
     pub fn current(&self) -> Option<&GnomeWindow> {
-        self.windows.get(self.selection_index)
+        if let Some(&idx) = self.filtered_windows.get(self.selection_index) {
+            self.windows.get(idx)
+        } else {
+            None
+        }
     }
 
     pub fn activate(&self) {
-        if let Some(win) = self.current()
-            && let Err(e) = activate_window(win.id)
-        {
-            eprintln!("Failed to activate window {}: {}", win.id, e);
+        if let Some(win) = self.current() {
+            if let Err(e) = activate_window(win.id) {
+                eprintln!("Failed to activate window {}: {}", win.id, e);
+            }
         }
     }
 }
