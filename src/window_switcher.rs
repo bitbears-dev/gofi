@@ -14,10 +14,15 @@ pub struct GnomeWindow {
 }
 
 pub struct WindowSwitcherState {
+    /// All windows retrieved from the backend (DBus or Wayland)
     pub windows: Vec<GnomeWindow>,
-    pub filtered_windows: Vec<usize>, // Indices into windows
-    pub selection_index: usize,       // Index into filtered_windows
+    /// Indices into `windows` that match the current query, along with matched character indices
+    pub filtered_windows: Vec<(usize, Vec<usize>)>,
+    /// Index into `filtered_windows` for the currently selected item
+    pub selection_index: usize,
+    /// Current search query string
     pub query: String,
+    /// Fuzzy matcher instance
     matcher: SkimMatcherV2,
 }
 
@@ -43,25 +48,33 @@ impl WindowSwitcherState {
 
     pub fn filter(&mut self) {
         if self.query.is_empty() {
-            self.filtered_windows = (0..self.windows.len()).collect();
+            self.filtered_windows = self
+                .windows
+                .iter()
+                .enumerate()
+                .map(|(i, _)| (i, Vec::new()))
+                .collect();
         } else {
-            let mut matches: Vec<(i64, usize)> = self
+            let mut matches: Vec<(i64, usize, Vec<usize>)> = self
                 .windows
                 .iter()
                 .enumerate()
                 .filter_map(|(i, win)| {
                     // Search against title and class
-                    let text = format!("{} {}", win.wm_class, win.title);
+                    let text = format!("{} - {}", win.wm_class, win.title);
                     self.matcher
-                        .fuzzy_match(&text, &self.query)
-                        .map(|score| (score, i))
+                        .fuzzy_indices(&text, &self.query)
+                        .map(|(score, indices)| (score, i, indices))
                 })
                 .collect();
 
             // Sort by score descending
             matches.sort_by(|a, b| b.0.cmp(&a.0));
 
-            self.filtered_windows = matches.into_iter().map(|(_, i)| i).collect();
+            self.filtered_windows = matches
+                .into_iter()
+                .map(|(_, i, indices)| (i, indices))
+                .collect();
         }
 
         // Reset selection
@@ -101,8 +114,8 @@ impl WindowSwitcherState {
     }
 
     pub fn current(&self) -> Option<&GnomeWindow> {
-        if let Some(&idx) = self.filtered_windows.get(self.selection_index) {
-            self.windows.get(idx)
+        if let Some((idx, _)) = self.filtered_windows.get(self.selection_index) {
+            self.windows.get(*idx)
         } else {
             None
         }
