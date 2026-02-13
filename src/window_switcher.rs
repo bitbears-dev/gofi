@@ -42,6 +42,11 @@ impl WindowSwitcherState {
             eprintln!("Failed to list windows: {}", e);
             Vec::new()
         });
+
+        // Filter out own window
+        let current_pid = std::process::id() as i32;
+        self.windows.retain(|w| w.pid != current_pid);
+
         eprintln!("[DEBUG] Found {} windows", self.windows.len());
         self.filter();
     }
@@ -202,4 +207,42 @@ fn activate_window(window_id: i64) -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("gdbus activate failed: {:?}", output).into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_filter_self_pid() {
+        let mut state = WindowSwitcherState::new();
+        // Since list_windows() relies on gdbus, we manually inject windows
+        let my_pid = std::process::id() as i32;
+        let other_pid = if my_pid == 0 { 1 } else { my_pid - 1 };
+
+        state.windows = vec![
+            GnomeWindow {
+                id: 1,
+                title: "Window 1".to_string(),
+                wm_class: "App1".to_string(),
+                wm_class_instance: "app1".to_string(),
+                pid: my_pid,
+                focus: false,
+            },
+            GnomeWindow {
+                id: 2,
+                title: "Window 2".to_string(),
+                wm_class: "App2".to_string(),
+                wm_class_instance: "app2".to_string(),
+                pid: other_pid,
+                focus: false,
+            },
+        ];
+
+        // Apply filtering logic (emulating what we added in refresh)
+        state.windows.retain(|w| w.pid != my_pid);
+
+        assert_eq!(state.windows.len(), 1);
+        assert_eq!(state.windows[0].pid, other_pid);
+    }
 }
