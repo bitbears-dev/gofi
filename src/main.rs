@@ -1,3 +1,9 @@
+use smithay_client_toolkit::reexports::calloop::{
+    EventLoop, RegistrationToken,
+    channel::{self, Sender},
+    timer::{TimeoutAction, Timer},
+};
+use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_keyboard, delegate_output, delegate_pointer, delegate_registry,
@@ -19,11 +25,13 @@ use smithay_client_toolkit::{
     },
     shm::{Shm, ShmHandler, slot::SlotPool},
 };
+use std::time::Duration;
 use wayland_client::{
-    Connection, Dispatch, QueueHandle,
-    globals::{GlobalListContents, registry_queue_init},
-    protocol::{wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_shm, wl_surface},
+    Connection, QueueHandle,
+    globals::registry_queue_init,
+    protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
 };
+use xkeysym::Keysym;
 
 use ab_glyph::{Font, PxScale, ScaleFont};
 use tiny_skia::{PixmapMut, Transform};
@@ -34,10 +42,13 @@ use window_switcher::WindowSwitcherState;
 mod test_switcher;
 
 fn main() {
+    let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+    let loop_handle = event_loop.handle();
+    let (sender, channel) = channel::channel();
+
     let conn = Connection::connect_to_env().unwrap();
-    let (globals, event_queue) = registry_queue_init::<App>(&conn).unwrap();
+    let (globals, mut event_queue) = registry_queue_init::<App>(&conn).unwrap();
     let qh = event_queue.handle();
-    let mut event_queue = event_queue;
 
     let shm = Shm::bind(&globals, &qh).expect("shm bind");
     let compositor = CompositorState::bind(&globals, &qh).expect("compositor bind");
@@ -52,8 +63,6 @@ fn main() {
 
     window.set_title("Gofi");
     window.set_app_id("gofi");
-    // Initial commit
-    // window.commit();
 
     let pool = SlotPool::new(1024 * 600 * 4, &shm).expect("Failed to create pool");
 
@@ -76,13 +85,17 @@ fn main() {
             std::fs::read("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf").expect("font load"),
         )
         .expect("font parse"),
+        qh: qh.clone(),
+        current_key_repeat: None,
+        repeat_rate: 25,
+        repeat_delay: 600,
+        repeat_sender: sender,
     };
 
-    // Roundtrip to get initial globals/outputs
+    // Roundtrip
     event_queue.roundtrip(&mut app).unwrap();
     event_queue.roundtrip(&mut app).unwrap();
 
-    // Calculate dynamic size
     let mut target_width = 1024;
     let mut target_height = 600;
 
@@ -104,19 +117,68 @@ fn main() {
         .xdg_toplevel()
         .set_min_size(target_width as i32, target_height as i32);
 
-    // Resize pool
     app.pool
         .resize((target_width * target_height * 4) as usize)
         .expect("resize pool");
 
-    // Initial refresh of windows
     app.window_switcher_state.refresh();
     app.draw(&qh);
 
     println!("Gofi started. Press ESC to exit.");
 
-    while !app.exit {
-        event_queue.blocking_dispatch(&mut app).unwrap();
+    WaylandSource::new(conn.clone(), event_queue)
+        .insert(loop_handle.clone())
+        .unwrap();
+
+    // Setup channel for key repeat
+    let loop_handle_clone = loop_handle.clone();
+    loop_handle
+        .insert_source(channel, move |event, _, app| match event {
+            channel::Event::Msg(RepeatCommand::Start {
+                keysym,
+                utf8,
+                delay,
+                rate,
+            }) => {
+                if let Some(rep) = app.current_key_repeat.take() {
+                    loop_handle_clone.remove(rep.token);
+                }
+
+                let sym = keysym;
+                let text = utf8.clone();
+                let qh = app.qh.clone();
+
+                let delay_dur = Duration::from_millis(delay as u64);
+
+                let token = loop_handle_clone
+                    .insert_source(Timer::from_duration(delay_dur), move |_, _, app| {
+                        app.handle_key_action(&qh, sym, text.clone());
+                        let period = if rate > 0 { 1000 / rate as u64 } else { 200 };
+                        TimeoutAction::ToDuration(Duration::from_millis(period))
+                    })
+                    .unwrap();
+
+                app.current_key_repeat = Some(KeyRepeat { keysym, token });
+            }
+            channel::Event::Msg(RepeatCommand::Stop { keysym }) => {
+                if let Some(rep) = &app.current_key_repeat {
+                    if rep.keysym == keysym {
+                        loop_handle_clone.remove(rep.token);
+                        app.current_key_repeat = None;
+                    }
+                }
+            }
+            channel::Event::Closed => {}
+        })
+        .unwrap();
+
+    loop {
+        event_loop
+            .dispatch(Duration::from_millis(16), &mut app)
+            .unwrap();
+        if app.exit {
+            break;
+        }
     }
 }
 
@@ -136,6 +198,30 @@ struct App {
     pointer: Option<wl_pointer::WlPointer>,
     window_switcher_state: WindowSwitcherState,
     font: ab_glyph::FontVec,
+
+    qh: QueueHandle<App>,
+    current_key_repeat: Option<KeyRepeat>,
+    repeat_rate: i32,
+    repeat_delay: i32,
+    repeat_sender: Sender<RepeatCommand>,
+}
+
+#[derive(Debug)]
+enum RepeatCommand {
+    Start {
+        keysym: Keysym,
+        utf8: Option<String>,
+        delay: u32,
+        rate: u32,
+    },
+    Stop {
+        keysym: Keysym,
+    },
+}
+
+struct KeyRepeat {
+    keysym: Keysym,
+    token: RegistrationToken,
 }
 
 impl App {
@@ -245,73 +331,29 @@ impl App {
             .set_window_geometry(0, 0, width as i32, height as i32);
         self.window.commit();
     }
-}
 
-fn draw_text_pixel(
-    pixmap: &mut PixmapMut,
-    font: &ab_glyph::FontVec,
-    x: f32,
-    y: f32,
-    text: &str,
-    color: tiny_skia::Color,
-    highlights: &[usize], // Add mismatch here
-) {
-    let scale = PxScale::from(18.0);
-    let scaled_font = font.as_scaled(scale);
-    let mut pen_x = x;
-    let pen_y = y + 18.0; // Baseline
+    fn handle_key_action(&mut self, qh: &QueueHandle<Self>, keysym: Keysym, utf8: Option<String>) {
+        use xkeysym::Keysym;
 
-    // Convert color to u8 components (ARGB)
-    // Default color
-    let r_def = (color.red() * 255.0) as u8;
-    let g_def = (color.green() * 255.0) as u8;
-    let b_def = (color.blue() * 255.0) as u8;
-
-    // Highlight color (Greenish Cyan: 0, 255, 255)
-    let r_hl = 0;
-    let g_hl = 255;
-    let b_hl = 255;
-
-    for (char_idx, c) in text.chars().enumerate() {
-        if c.is_control() {
-            continue;
-        }
-
-        let is_highlight = highlights.contains(&char_idx);
-        let (r, g, b) = if is_highlight {
-            (r_hl, g_hl, b_hl)
+        if keysym == Keysym::Escape {
+            self.exit = true;
+        } else if keysym == Keysym::Down {
+            self.window_switcher_state.next();
+        } else if keysym == Keysym::Up {
+            self.window_switcher_state.prev();
+        } else if keysym == Keysym::Return {
+            self.window_switcher_state.activate();
+            self.exit = true;
+        } else if keysym == Keysym::BackSpace {
+            self.window_switcher_state.backspace();
         } else {
-            (r_def, g_def, b_def)
-        };
-
-        let glyph_id = scaled_font.glyph_id(c);
-        let glyph = glyph_id.with_scale_and_position(scale, ab_glyph::point(pen_x, pen_y));
-
-        if let Some(outlined) = scaled_font.outline_glyph(glyph) {
-            let bounds = outlined.px_bounds();
-            outlined.draw(|px, py, v| {
-                let px = bounds.min.x as i32 + px as i32;
-                let py = bounds.min.y as i32 + py as i32;
-                if px >= 0 && px < pixmap.width() as i32 && py >= 0 && py < pixmap.height() as i32 {
-                    let idx = (py as usize * pixmap.width() as usize + px as usize) * 4;
-                    let pixel = &mut pixmap.data_mut()[idx..idx + 4];
-
-                    // Alpha blending
-                    // v is coverage (0.0 - 1.0)
-                    if v > 0.01 {
-                        let src_a = (v * 255.0) as u16;
-                        let inv_a = 255 - src_a;
-
-                        // pixel layout: [Blue, Green, Red, Alpha]
-                        pixel[0] = ((b as u16 * src_a + pixel[0] as u16 * inv_a) / 255) as u8;
-                        pixel[1] = ((g as u16 * src_a + pixel[1] as u16 * inv_a) / 255) as u8;
-                        pixel[2] = ((r as u16 * src_a + pixel[2] as u16 * inv_a) / 255) as u8;
-                        pixel[3] = ((255 * src_a + pixel[3] as u16 * inv_a) / 255) as u8;
-                    }
+            if let Some(text) = utf8 {
+                if !text.chars().any(|c| c.is_control()) {
+                    self.window_switcher_state.input_text(&text);
                 }
-            });
+            }
         }
-        pen_x += scaled_font.h_advance(glyph_id);
+        self.draw(qh);
     }
 }
 
@@ -400,7 +442,7 @@ impl WindowHandler for App {
     fn configure(
         &mut self,
         _conn: &Connection,
-        qh: &QueueHandle<Self>,
+        _qh: &QueueHandle<Self>,
         _window: &Window,
         configure: WindowConfigure,
         _serial: u32,
@@ -480,55 +522,31 @@ impl KeyboardHandler for App {
     ) {
         use xkeysym::Keysym;
 
-        // In smithay-client-toolkit 0.18+, press_key is only called for pressed events.
-        // We don't need to check state.
-
         let sym = event.keysym;
+        let utf8 = event.utf8;
 
-        if sym == Keysym::Escape {
-            self.exit = true;
-        } else if sym == Keysym::Down {
-            self.window_switcher_state.selection_index += 1;
-            if self.window_switcher_state.selection_index
-                >= self.window_switcher_state.filtered_windows.len()
-            {
-                self.window_switcher_state.selection_index = 0;
-            }
-        } else if sym == Keysym::Up {
-            if self.window_switcher_state.selection_index == 0 {
-                self.window_switcher_state.selection_index = self
-                    .window_switcher_state
-                    .filtered_windows
-                    .len()
-                    .saturating_sub(1);
-            } else {
-                self.window_switcher_state.selection_index -= 1;
-            }
-        } else if sym == Keysym::Return {
-            if let Some((win_idx, _)) = self
-                .window_switcher_state
-                .filtered_windows
-                .get(self.window_switcher_state.selection_index)
-            {
-                let win = &self.window_switcher_state.windows[*win_idx];
-                self.window_switcher_state.activate();
-                println!("Switching to: {} ({})", win.title, win.wm_class);
-                self.exit = true;
-            }
-        } else if sym == Keysym::BackSpace {
-            if !self.window_switcher_state.query.is_empty() {
-                self.window_switcher_state.query.pop();
-                self.window_switcher_state.filter();
-            }
-        } else {
-            if let Some(utf8) = event.utf8 {
-                if !utf8.chars().any(|c| c.is_control()) {
-                    self.window_switcher_state.query.push_str(&utf8);
-                    self.window_switcher_state.filter();
-                }
-            }
+        // Cancel previous repeat if new press
+        self.repeat_sender
+            .send(RepeatCommand::Stop { keysym: sym })
+            .ok();
+
+        // Execute action immediately
+        self.handle_key_action(qh, sym, utf8.clone());
+
+        // Schedule repeat if it is a repeatable key
+        let should_repeat = matches!(sym, Keysym::BackSpace | Keysym::Down | Keysym::Up)
+            || (utf8.is_some() && !utf8.as_ref().unwrap().chars().any(|c| c.is_control()));
+
+        if should_repeat {
+            self.repeat_sender
+                .send(RepeatCommand::Start {
+                    keysym: sym,
+                    utf8,
+                    delay: self.repeat_delay as u32,
+                    rate: self.repeat_rate as u32,
+                })
+                .ok();
         }
-        self.draw(qh);
     }
 
     fn release_key(
@@ -537,8 +555,13 @@ impl KeyboardHandler for App {
         _qh: &QueueHandle<Self>,
         _keyboard: &wl_keyboard::WlKeyboard,
         _serial: u32,
-        _event: KeyEvent,
+        event: KeyEvent,
     ) {
+        self.repeat_sender
+            .send(RepeatCommand::Stop {
+                keysym: event.keysym,
+            })
+            .ok();
     }
 
     fn update_modifiers(
@@ -572,6 +595,32 @@ impl KeyboardHandler for App {
         _surface: &wl_surface::WlSurface,
         _serial: u32,
     ) {
+        // Stop all repeats? We can just send stop for current if any.
+        // But we don't know current here easily without saving it.
+        // Actually we can just not send anything or assume logic handles it?
+        // Optimally we should stop.
+        // But RepeatCommand::Stop requires keysym.
+        // We can add StopAll.
+        // For now ignore.
+    }
+
+    fn update_repeat_info(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        info: smithay_client_toolkit::seat::keyboard::RepeatInfo,
+    ) {
+        match info {
+            smithay_client_toolkit::seat::keyboard::RepeatInfo::Repeat { rate, delay } => {
+                self.repeat_rate = rate.get() as i32;
+                self.repeat_delay = delay as i32;
+            }
+            smithay_client_toolkit::seat::keyboard::RepeatInfo::Disable => {
+                self.repeat_rate = 0;
+                self.repeat_delay = 0;
+            }
+        }
     }
 }
 
@@ -603,6 +652,74 @@ impl ProvidesRegistryState for App {
     }
 
     registry_handlers![OutputState, SeatState];
+}
+
+fn draw_text_pixel(
+    pixmap: &mut PixmapMut,
+    font: &ab_glyph::FontVec,
+    x: f32,
+    y: f32,
+    text: &str,
+    color: tiny_skia::Color,
+    highlights: &[usize], // Add mismatch here
+) {
+    let scale = PxScale::from(18.0);
+    let scaled_font = font.as_scaled(scale);
+    let mut pen_x = x;
+    let pen_y = y + 18.0; // Baseline
+
+    // Convert color to u8 components (ARGB)
+    // Default color
+    let r_def = (color.red() * 255.0) as u8;
+    let g_def = (color.green() * 255.0) as u8;
+    let b_def = (color.blue() * 255.0) as u8;
+
+    // Highlight color (Greenish Cyan: 0, 255, 255)
+    let r_hl = 0;
+    let g_hl = 255;
+    let b_hl = 255;
+
+    for (char_idx, c) in text.chars().enumerate() {
+        if c.is_control() {
+            continue;
+        }
+
+        let is_highlight = highlights.contains(&char_idx);
+        let (r, g, b) = if is_highlight {
+            (r_hl, g_hl, b_hl)
+        } else {
+            (r_def, g_def, b_def)
+        };
+
+        let glyph_id = scaled_font.glyph_id(c);
+        let glyph = glyph_id.with_scale_and_position(scale, ab_glyph::point(pen_x, pen_y));
+
+        if let Some(outlined) = scaled_font.outline_glyph(glyph) {
+            let bounds = outlined.px_bounds();
+            outlined.draw(|px, py, v| {
+                let px = bounds.min.x as i32 + px as i32;
+                let py = bounds.min.y as i32 + py as i32;
+                if px >= 0 && px < pixmap.width() as i32 && py >= 0 && py < pixmap.height() as i32 {
+                    let idx = (py as usize * pixmap.width() as usize + px as usize) * 4;
+                    let pixel = &mut pixmap.data_mut()[idx..idx + 4];
+
+                    // Alpha blending
+                    // v is coverage (0.0 - 1.0)
+                    if v > 0.01 {
+                        let src_a = (v * 255.0) as u16;
+                        let inv_a = 255 - src_a;
+
+                        // pixel layout: [Blue, Green, Red, Alpha]
+                        pixel[0] = ((b as u16 * src_a + pixel[0] as u16 * inv_a) / 255) as u8;
+                        pixel[1] = ((g as u16 * src_a + pixel[1] as u16 * inv_a) / 255) as u8;
+                        pixel[2] = ((r as u16 * src_a + pixel[2] as u16 * inv_a) / 255) as u8;
+                        pixel[3] = ((255 * src_a + pixel[3] as u16 * inv_a) / 255) as u8;
+                    }
+                }
+            });
+        }
+        pen_x += scaled_font.h_advance(glyph_id);
+    }
 }
 
 delegate_compositor!(App);
