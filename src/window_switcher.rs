@@ -20,6 +20,8 @@ pub struct WindowSwitcherState {
     pub filtered_windows: Vec<(usize, Vec<usize>)>,
     /// Index into `filtered_windows` for the currently selected item
     pub selection_index: usize,
+    /// Offset for scrolling the window list
+    pub scroll_offset: usize,
     /// Current search query string
     pub query: String,
     /// Fuzzy matcher instance
@@ -32,6 +34,7 @@ impl WindowSwitcherState {
             windows: Vec::new(),
             filtered_windows: Vec::new(),
             selection_index: 0,
+            scroll_offset: 0,
             query: String::new(),
             matcher: SkimMatcherV2::default(),
         }
@@ -84,6 +87,7 @@ impl WindowSwitcherState {
 
         // Reset selection
         self.selection_index = 0;
+        self.scroll_offset = 0;
     }
 
     pub fn input_text(&mut self, text: &str) {
@@ -131,6 +135,24 @@ impl WindowSwitcherState {
             if let Err(e) = activate_window(win.id) {
                 eprintln!("Failed to activate window {}: {}", win.id, e);
             }
+        }
+    }
+
+    pub fn ensure_visible(&mut self, max_items: usize) {
+        if self.filtered_windows.is_empty() {
+            self.scroll_offset = 0;
+            return;
+        }
+
+        if self.selection_index < self.scroll_offset {
+            self.scroll_offset = self.selection_index;
+        } else if self.selection_index >= self.scroll_offset + max_items {
+            self.scroll_offset = self.selection_index + 1 - max_items;
+        }
+
+        // Ensure scroll_offset is valid (just in case max_items is large)
+        if self.scroll_offset > self.filtered_windows.len() {
+            self.scroll_offset = 0;
         }
     }
 }
@@ -244,5 +266,54 @@ mod tests {
 
         assert_eq!(state.windows.len(), 1);
         assert_eq!(state.windows[0].pid, other_pid);
+    }
+
+    #[test]
+    fn test_ensure_visible() {
+        let mut state = WindowSwitcherState::new();
+        // Mock filtered windows (indices only needed)
+        // 10 items
+        state.filtered_windows = (0..10).map(|i| (i, vec![])).collect();
+
+        let max_items = 5;
+
+        // Case 1: Initial state
+        state.selection_index = 0;
+        state.ensure_visible(max_items);
+        assert_eq!(state.scroll_offset, 0);
+
+        // Case 2: Move down within view
+        state.selection_index = 4;
+        state.ensure_visible(max_items);
+        assert_eq!(state.scroll_offset, 0);
+
+        // Case 3: Move down out of view
+        state.selection_index = 5;
+        state.ensure_visible(max_items);
+        // Should scroll to include 5.
+        // range [offset, offset + 5) must include 5.
+        // if offset = 1, range is [1, 6), includes 5.
+        assert_eq!(state.scroll_offset, 1);
+
+        // Case 4: Jump to end
+        state.selection_index = 9;
+        state.ensure_visible(max_items);
+        // range [offset, offset + 5) must include 9.
+        // offset + 5 > 9 => offset > 4. So offset = 5.
+        // range [5, 10), includes 9.
+        assert_eq!(state.scroll_offset, 5);
+
+        // Case 5: Move up
+        state.selection_index = 4;
+        state.ensure_visible(max_items);
+        // range [offset, offset + 5) must include 4.
+        // current offset 5, range [5, 10) does NOT include 4.
+        // new offset should be 4. range [4, 9).
+        assert_eq!(state.scroll_offset, 4);
+
+        // Case 6: Jump to start
+        state.selection_index = 0;
+        state.ensure_visible(max_items);
+        assert_eq!(state.scroll_offset, 0);
     }
 }

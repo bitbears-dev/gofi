@@ -18,10 +18,7 @@ mod tests {
         state.filter();
         println!("Filtered 'a': {}", state.filtered_windows.len());
 
-        // Test selection wrapping
-        state.selection_index = state.filtered_windows.len() + 5; // Out of bounds
-        // The logic in main.rs handles clamping/wrapping, not the state struct itself in current implementation.
-        // Let's verify state struct has correct public fields.
-        assert!(state.selection_index == 0); // Default
+        // Check initial state
+        assert_eq!(state.selection_index, 0);
     }
 }

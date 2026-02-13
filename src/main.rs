@@ -183,12 +183,21 @@ impl App {
             // Draw below search bar
             let mut y = 50.0;
 
+            // Calculate max items that fit in the view
+            // Available height is roughly height - 50.0 (top) - 30.0 (bottom margin logic)
+            let item_height = 28.0;
+            let available_height = (height as f32 - 80.0).max(0.0);
+            let max_items = (available_height / item_height).floor() as usize;
+
+            self.window_switcher_state.ensure_visible(max_items);
+
             // Iterate over filtered windows
             for (i, (win_idx, indices)) in self
                 .window_switcher_state
                 .filtered_windows
                 .iter()
                 .enumerate()
+                .skip(self.window_switcher_state.scroll_offset)
             {
                 // Limit number of items drawn to fit screen
                 if y > height as f32 - 30.0 {
