@@ -154,7 +154,7 @@ fn list_windows() -> Result<Vec<GnomeWindow>, Box<dyn std::error::Error>> {
 
     let json_str = stdout.trim();
     // Remove starting "('" and ending "')"
-    let json_str = if json_str.starts_with("('") && json_str.ends_with("',)") {
+    let extracted = if json_str.starts_with("('") && json_str.ends_with("',)") {
         &json_str[2..json_str.len() - 3]
     } else if json_str.starts_with("('") && json_str.ends_with("')") {
         // Allow without comma just in case
@@ -177,22 +177,11 @@ fn list_windows() -> Result<Vec<GnomeWindow>, Box<dyn std::error::Error>> {
         }
     };
 
-    // Unescape the string if it was a GVariant string literal?
-    // GVariant string literal might have escaped quotes.
-    // e.g. "('\"[{\\\"id\\\": ...}]\"',)"
-    // The user's output suggests raw JSON inside the string: `('[{"in_current_workspace":...}]',)`
-    // So extracting between `('` and `',)` should be enough.
-    // But `gdbus` might escape internal quotes if they exist.
-    // However, the JSON itself uses double quotes. `gdbus` wraps the string in single quotes.
-    // If the JSON contains single quotes, `gdbus` would escape them.
-    // Assuming standard output for now.
+    // Unescape the string manually
+    // The gdbus output seems to escape double quotes with backslash, e.g. \" -> "
+    let unescaped = extracted.replace("\\\"", "\"").replace("\\\\", "\\");
 
-    // Also handle escaped characters if gdbus escapes them.
-    // Rust's `String` from `gdbus` output is raw bytes.
-    // If we take the slice, it's still raw.
-    // Use `serde_json` to parse directly.
-
-    let windows: Vec<GnomeWindow> = serde_json::from_str(json_str)?;
+    let windows: Vec<GnomeWindow> = serde_json::from_str(&unescaped)?;
     Ok(windows)
 }
 
