@@ -602,6 +602,16 @@ impl KeyboardHandler for App {
         // But RepeatCommand::Stop requires keysym.
         // We can add StopAll.
         // For now ignore.
+
+        // Close key repeat if any active
+        if let Some(rep) = &self.current_key_repeat {
+            self.repeat_sender
+                .send(RepeatCommand::Stop { keysym: rep.keysym })
+                .ok();
+        }
+
+        // Exit when focus is lost
+        self.exit = true;
     }
 
     fn update_repeat_info(
