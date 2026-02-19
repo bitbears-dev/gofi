@@ -8,9 +8,7 @@ pub struct GnomeWindow {
     pub id: i64,
     pub title: String,
     pub wm_class: String,
-    pub wm_class_instance: String,
     pub pid: i32,
-    pub focus: bool,
 }
 
 pub struct WindowSwitcherState {
@@ -131,10 +129,10 @@ impl WindowSwitcherState {
     }
 
     pub fn activate(&self) {
-        if let Some(win) = self.current() {
-            if let Err(e) = activate_window(win.id) {
-                eprintln!("Failed to activate window {}: {}", win.id, e);
-            }
+        if let Some(win) = self.current()
+            && let Err(e) = activate_window(win.id)
+        {
+            eprintln!("Failed to activate window {}: {}", win.id, e);
         }
     }
 
@@ -158,77 +156,69 @@ impl WindowSwitcherState {
 }
 
 fn list_windows() -> Result<Vec<GnomeWindow>, Box<dyn std::error::Error>> {
-    let output = Command::new("gdbus")
-        .arg("call")
+    let stdout = run_gdbus("org.gnome.Shell.Extensions.Windows.List", None)?;
+    let json_str = extract_json_from_gdbus(&stdout);
+    let windows: Vec<GnomeWindow> = serde_json::from_str(&json_str)?;
+    Ok(windows)
+}
+
+fn activate_window(window_id: i64) -> Result<(), Box<dyn std::error::Error>> {
+    run_gdbus(
+        "org.gnome.Shell.Extensions.Windows.Activate",
+        Some(window_id.to_string()),
+    )?;
+    Ok(())
+}
+
+fn run_gdbus(method: &str, arg: Option<String>) -> Result<String, Box<dyn std::error::Error>> {
+    let mut cmd = Command::new("gdbus");
+    cmd.arg("call")
         .arg("--session")
         .arg("--dest")
         .arg("org.gnome.Shell")
         .arg("--object-path")
         .arg("/org/gnome/Shell/Extensions/Windows")
         .arg("--method")
-        .arg("org.gnome.Shell.Extensions.Windows.List")
-        .output()?;
+        .arg(method);
+
+    if let Some(a) = arg {
+        cmd.arg(a);
+    }
+
+    let output = cmd.output()?;
 
     if !output.status.success() {
         return Err(format!("gdbus command failed: {:?}", output).into());
     }
 
-    let stdout = String::from_utf8(output.stdout)?;
-    // output format is like: ('[{"id": ...}]',)
-    // We need to extract the JSON string inside the tuple.
-    // It usually starts with `('` and ends with `',)` or similar.
-    // Let's trim and strip appropriately.
+    Ok(String::from_utf8(output.stdout)?)
+}
 
-    let json_str = stdout.trim();
-    // Remove starting "('" and ending "')"
-    let extracted = if json_str.starts_with("('") && json_str.ends_with("',)") {
-        &json_str[2..json_str.len() - 3]
-    } else if json_str.starts_with("('") && json_str.ends_with("')") {
-        // Allow without comma just in case
-        &json_str[2..json_str.len() - 2]
+fn extract_json_from_gdbus(input: &str) -> String {
+    let trimmed = input.trim();
+
+    // The output is usually a Python-like tuple string: "('[json_string]',)"
+    // We want to extract the inner string content.
+    let extracted = if trimmed.starts_with("('") && trimmed.ends_with("',)") {
+        &trimmed[2..trimmed.len() - 3]
+    } else if trimmed.starts_with("('") && trimmed.ends_with("')") {
+        &trimmed[2..trimmed.len() - 2]
     } else {
-        // Fallback or error? gdbus output can refer to GVariant text format.
-        // Usually `gdbus call` returns a tuple.
-        // It might be complex to parse perfectly without regex or manual scanning.
-        // But for common case of single string return:
-
-        // Try to find the start of JSON array `[` and end `]`.
-        if let Some(start) = json_str.find('[') {
-            if let Some(end) = json_str.rfind(']') {
-                &json_str[start..=end]
+        // Fallback: try to find the JSON array brackets if present
+        if let Some(start) = trimmed.find('[') {
+            if let Some(end) = trimmed.rfind(']') {
+                &trimmed[start..=end]
             } else {
-                json_str
+                trimmed
             }
         } else {
-            json_str
+            trimmed
         }
     };
 
     // Unescape the string manually
-    // The gdbus output seems to escape double quotes with backslash, e.g. \" -> "
-    let unescaped = extracted.replace("\\\"", "\"").replace("\\\\", "\\");
-
-    let windows: Vec<GnomeWindow> = serde_json::from_str(&unescaped)?;
-    Ok(windows)
-}
-
-fn activate_window(window_id: i64) -> Result<(), Box<dyn std::error::Error>> {
-    let output = Command::new("gdbus")
-        .arg("call")
-        .arg("--session")
-        .arg("--dest")
-        .arg("org.gnome.Shell")
-        .arg("--object-path")
-        .arg("/org/gnome/Shell/Extensions/Windows")
-        .arg("--method")
-        .arg("org.gnome.Shell.Extensions.Windows.Activate")
-        .arg(window_id.to_string())
-        .output()?;
-
-    if !output.status.success() {
-        return Err(format!("gdbus activate failed: {:?}", output).into());
-    }
-    Ok(())
+    // The gdbus output escapes double quotes with backslash, e.g. \" -> "
+    extracted.replace("\\\"", "\"").replace("\\\\", "\\")
 }
 
 #[cfg(test)]
@@ -247,17 +237,13 @@ mod tests {
                 id: 1,
                 title: "Window 1".to_string(),
                 wm_class: "App1".to_string(),
-                wm_class_instance: "app1".to_string(),
                 pid: my_pid,
-                focus: false,
             },
             GnomeWindow {
                 id: 2,
                 title: "Window 2".to_string(),
                 wm_class: "App2".to_string(),
-                wm_class_instance: "app2".to_string(),
                 pid: other_pid,
-                focus: false,
             },
         ];
 
@@ -315,5 +301,24 @@ mod tests {
         state.selection_index = 0;
         state.ensure_visible(max_items);
         assert_eq!(state.scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_extract_json_from_gdbus() {
+        let input = "('[{\"id\": 1, \"title\": \"Term\"}]',)";
+        let output = extract_json_from_gdbus(input);
+        assert_eq!(output, "[{\"id\": 1, \"title\": \"Term\"}]");
+
+        let input_no_comma = "('[{\"id\": 1}]')";
+        let output_no_comma = extract_json_from_gdbus(input_no_comma);
+        assert_eq!(output_no_comma, "[{\"id\": 1}]");
+
+        let input_raw = "[{\"id\": 1}]";
+        let output_raw = extract_json_from_gdbus(input_raw);
+        assert_eq!(output_raw, "[{\"id\": 1}]");
+
+        let input_escaped_quote = "('[{\"title\": \"\\\"Quoted\\\"\"}]',)";
+        let output_escaped = extract_json_from_gdbus(input_escaped_quote);
+        assert_eq!(output_escaped, "[{\"title\": \"\"Quoted\"\"}]");
     }
 }
