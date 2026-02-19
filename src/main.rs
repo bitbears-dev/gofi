@@ -1,3 +1,6 @@
+use std::time::Duration;
+
+use ab_glyph::{Font, PxScale, ScaleFont};
 use smithay_client_toolkit::reexports::calloop::{
     EventLoop, RegistrationToken,
     channel::{self, Sender},
@@ -25,16 +28,13 @@ use smithay_client_toolkit::{
     },
     shm::{Shm, ShmHandler, slot::SlotPool},
 };
-use std::time::Duration;
+use tiny_skia::{PixmapMut, Transform};
 use wayland_client::{
     Connection, QueueHandle,
     globals::registry_queue_init,
     protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
 };
 use xkeysym::Keysym;
-
-use ab_glyph::{Font, PxScale, ScaleFont};
-use tiny_skia::{PixmapMut, Transform};
 
 mod window_switcher;
 use window_switcher::WindowSwitcherState;
@@ -81,10 +81,7 @@ fn main() {
         keyboard: None,
         pointer: None,
         window_switcher_state: WindowSwitcherState::new(),
-        font: ab_glyph::FontVec::try_from_vec(
-            std::fs::read("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf").expect("font load"),
-        )
-        .expect("font parse"),
+        fonts: load_fonts(),
         qh: qh.clone(),
         current_key_repeat: None,
         repeat_rate: 25,
@@ -99,15 +96,15 @@ fn main() {
     let mut target_width = 1024;
     let mut target_height = 600;
 
-    if let Some(output) = app.output_state.outputs().next() {
-        if let Some(info) = app.output_state.info(&output) {
-            if let Some(mode) = info.logical_size {
-                target_width = (mode.0 as f32 * 0.8) as u32;
-                target_height = (mode.1 as f32 * 0.3) as u32;
-            } else if let Some(mode) = info.modes.iter().find(|m| m.current || m.preferred) {
-                target_width = (mode.dimensions.0 as f32 * 0.8) as u32;
-                target_height = (mode.dimensions.1 as f32 * 0.3) as u32;
-            }
+    if let Some(output) = app.output_state.outputs().next()
+        && let Some(info) = app.output_state.info(&output)
+    {
+        if let Some(mode) = info.logical_size {
+            target_width = (mode.0 as f32 * 0.8) as u32;
+            target_height = (mode.1 as f32 * 0.3) as u32;
+        } else if let Some(mode) = info.modes.iter().find(|m| m.current || m.preferred) {
+            target_width = (mode.dimensions.0 as f32 * 0.8) as u32;
+            target_height = (mode.dimensions.1 as f32 * 0.3) as u32;
         }
     }
 
@@ -161,11 +158,11 @@ fn main() {
                 app.current_key_repeat = Some(KeyRepeat { keysym, token });
             }
             channel::Event::Msg(RepeatCommand::Stop { keysym }) => {
-                if let Some(rep) = &app.current_key_repeat {
-                    if rep.keysym == keysym {
-                        loop_handle_clone.remove(rep.token);
-                        app.current_key_repeat = None;
-                    }
+                if let Some(rep) = &app.current_key_repeat
+                    && rep.keysym == keysym
+                {
+                    loop_handle_clone.remove(rep.token);
+                    app.current_key_repeat = None;
                 }
             }
             channel::Event::Closed => {}
@@ -197,7 +194,7 @@ struct App {
     keyboard: Option<wl_keyboard::WlKeyboard>,
     pointer: Option<wl_pointer::WlPointer>,
     window_switcher_state: WindowSwitcherState,
-    font: ab_glyph::FontVec,
+    fonts: Vec<ab_glyph::FontVec>,
 
     qh: QueueHandle<App>,
     current_key_repeat: Option<KeyRepeat>,
@@ -257,7 +254,7 @@ impl App {
             // Draw search query
             draw_text_pixel(
                 &mut pixmap,
-                &self.font,
+                &self.fonts,
                 10.0,
                 10.0,
                 &format!("Search: {}", self.window_switcher_state.query),
@@ -308,7 +305,7 @@ impl App {
                     let title = format!("{} - {}", win.wm_class, win.title); // Show app name + title
                     draw_text_pixel(
                         &mut pixmap,
-                        &self.font,
+                        &self.fonts,
                         20.0,
                         y + 2.0, // Center vertically roughly
                         &title,  // Use combined title
@@ -346,12 +343,10 @@ impl App {
             self.exit = true;
         } else if keysym == Keysym::BackSpace {
             self.window_switcher_state.backspace();
-        } else {
-            if let Some(text) = utf8 {
-                if !text.chars().any(|c| c.is_control()) {
-                    self.window_switcher_state.input_text(&text);
-                }
-            }
+        } else if let Some(text) = utf8
+            && !text.chars().any(|c| c.is_control())
+        {
+            self.window_switcher_state.input_text(&text);
         }
         self.draw(qh);
     }
@@ -595,14 +590,6 @@ impl KeyboardHandler for App {
         _surface: &wl_surface::WlSurface,
         _serial: u32,
     ) {
-        // Stop all repeats? We can just send stop for current if any.
-        // But we don't know current here easily without saving it.
-        // Actually we can just not send anything or assume logic handles it?
-        // Optimally we should stop.
-        // But RepeatCommand::Stop requires keysym.
-        // We can add StopAll.
-        // For now ignore.
-
         // Close key repeat if any active
         if let Some(rep) = &self.current_key_repeat {
             self.repeat_sender
@@ -666,7 +653,7 @@ impl ProvidesRegistryState for App {
 
 fn draw_text_pixel(
     pixmap: &mut PixmapMut,
-    font: &ab_glyph::FontVec,
+    fonts: &[ab_glyph::FontVec],
     x: f32,
     y: f32,
     text: &str,
@@ -674,7 +661,10 @@ fn draw_text_pixel(
     highlights: &[usize], // Add mismatch here
 ) {
     let scale = PxScale::from(18.0);
-    let scaled_font = font.as_scaled(scale);
+    // Use the measurement from the first font for simplicity of layout
+    // In a real text layout engine, this would be more complex.
+    let default_font = &fonts[0];
+
     let mut pen_x = x;
     let pen_y = y + 18.0; // Baseline
 
@@ -701,7 +691,22 @@ fn draw_text_pixel(
             (r_def, g_def, b_def)
         };
 
-        let glyph_id = scaled_font.glyph_id(c);
+        // Find the font that contains the glyph
+        let mut best_font = default_font;
+        let mut glyph_id = best_font.glyph_id(c);
+
+        if glyph_id.0 == 0 {
+            for font in fonts.iter().skip(1) {
+                let id = font.glyph_id(c);
+                if id.0 != 0 {
+                    best_font = font;
+                    glyph_id = id;
+                    break;
+                }
+            }
+        }
+
+        let scaled_font = best_font.as_scaled(scale);
         let glyph = glyph_id.with_scale_and_position(scale, ab_glyph::point(pen_x, pen_y));
 
         if let Some(outlined) = scaled_font.outline_glyph(glyph) {
@@ -728,6 +733,8 @@ fn draw_text_pixel(
                 }
             });
         }
+        // Advance using the font that actually rendered the glyph, or default if it's 0-width?
+        // Ideally we should use the advance from the font used.
         pen_x += scaled_font.h_advance(glyph_id);
     }
 }
@@ -741,3 +748,99 @@ delegate_pointer!(App);
 delegate_xdg_shell!(App);
 delegate_xdg_window!(App);
 delegate_registry!(App);
+
+fn load_fonts() -> Vec<ab_glyph::FontVec> {
+    let mut db = fontdb::Database::new();
+    db.load_system_fonts();
+
+    let mut loaded_fonts = Vec::new();
+
+    // 1. Try to get default font from GNOME settings (Primary)
+    let de_font = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.interface", "font-name"])
+        .output()
+        .ok()
+        .and_then(|output| {
+            if output.status.success() {
+                String::from_utf8(output.stdout).ok()
+            } else {
+                None
+            }
+        })
+        .map(|s| {
+            let s = s.trim().trim_matches('\'');
+            let parts: Vec<&str> = s.rsplitn(2, ' ').collect();
+            if parts.len() == 2 && parts[0].parse::<f32>().is_ok() {
+                parts[1].to_string()
+            } else {
+                s.to_string()
+            }
+        });
+
+    // Helper to load a font by family name
+    let load_font = |family: fontdb::Family| -> Option<ab_glyph::FontVec> {
+        let query = fontdb::Query {
+            families: &[family],
+            ..Default::default()
+        };
+
+        if let Some(id) = db.query(&query) {
+            let face = db.face(id).expect("font face");
+            let (path, index) = match &face.source {
+                fontdb::Source::File(path) => (path, face.index),
+                fontdb::Source::SharedFile(path, _) => (path, face.index),
+                _ => return None, // Skip unsupported sources
+            };
+
+            println!("Loading font: {:?}", path);
+            if let Ok(data) = std::fs::read(path) {
+                return ab_glyph::FontVec::try_from_vec_and_index(data, index).ok();
+            }
+        }
+        None
+    };
+
+    // Load Primary Font
+    if let Some(ref name) = de_font {
+        println!("Detected DE font: {}", name);
+        if let Some(font) = load_font(fontdb::Family::Name(name)) {
+            loaded_fonts.push(font);
+        }
+    } else {
+        // Fallback to generic SansSerif if no DE font detected
+        if let Some(font) = load_font(fontdb::Family::SansSerif) {
+            loaded_fonts.push(font);
+        }
+    }
+
+    // 2. Load Fallback CJK Font
+    let cjk_families = [
+        "Noto Sans CJK JP",
+        "Noto Sans CJK KR",
+        "Noto Sans CJK SC",
+        "Noto Sans CJK TC",
+        "Noto Sans CJK",
+        "Droid Sans Fallback",
+    ];
+
+    for family in cjk_families {
+        if let Some(font) = load_font(fontdb::Family::Name(family)) {
+            loaded_fonts.push(font);
+            // We only need one good CJK fallback usually
+            break;
+        }
+    }
+
+    // Ensure we have at least one font
+    if loaded_fonts.is_empty()
+        && let Some(font) = load_font(fontdb::Family::SansSerif)
+    {
+        loaded_fonts.push(font);
+    }
+    // If still empty, try to load *any* sans-serif from system (last ditch)
+    if loaded_fonts.is_empty() {
+        panic!("Could not load any suitable font");
+    }
+
+    loaded_fonts
+}
