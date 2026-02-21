@@ -18,6 +18,7 @@ use xkeysym::Keysym;
 
 use crate::key_repeat::{KeyRepeat, RepeatCommand};
 use crate::rendering::draw_text_pixel;
+use crate::theme;
 use crate::window_switcher::WindowSwitcherState;
 
 pub(crate) struct App {
@@ -66,7 +67,8 @@ impl App {
 
         if let Some(mut pixmap) = PixmapMut::from_bytes(canvas, width, height) {
             let mut paint = tiny_skia::Paint::default();
-            paint.set_color_rgba8(30, 30, 30, 200);
+            let (r, g, b, a) = theme::BG_COLOR;
+            paint.set_color_rgba8(r, g, b, a);
             pixmap.fill_rect(
                 tiny_skia::Rect::from_xywh(0.0, 0.0, width as f32, height as f32).unwrap(),
                 &paint,
@@ -78,8 +80,8 @@ impl App {
             draw_text_pixel(
                 &mut pixmap,
                 &self.fonts,
-                10.0,
-                10.0,
+                theme::PADDING,
+                theme::PADDING,
                 &format!("Search: {}", self.window_switcher_state.query),
                 tiny_skia::Color::WHITE,
                 &[], // No highlight for search bar
@@ -87,12 +89,11 @@ impl App {
 
             let selection = self.window_switcher_state.selection_index;
             // Draw below search bar
-            let mut y = 50.0;
+            let mut y = theme::SEARCH_BAR_Y;
 
             // Calculate max items that fit in the view
-            // Available height is roughly height - 50.0 (top) - 30.0 (bottom margin logic)
-            let item_height = 28.0;
-            let available_height = (height as f32 - 80.0).max(0.0);
+            let item_height = theme::ITEM_HEIGHT;
+            let available_height = (height as f32 - theme::TOP_BOTTOM_MARGIN).max(0.0);
             let max_items = (available_height / item_height).floor() as usize;
 
             self.window_switcher_state.ensure_visible(max_items);
@@ -106,20 +107,28 @@ impl App {
                 .skip(self.window_switcher_state.scroll_offset)
             {
                 // Limit number of items drawn to fit screen
-                if y > height as f32 - 30.0 {
+                if y > height as f32 - theme::BOTTOM_MARGIN {
                     break;
                 }
 
                 let win = &self.window_switcher_state.windows[*win_idx];
 
                 let is_selected = i == selection;
-                let rect_color = if is_selected {
-                    tiny_skia::Color::from_rgba8(60, 100, 160, 255)
-                } else {
-                    tiny_skia::Color::from_rgba8(50, 50, 50, 255)
+                let rect_color = {
+                    let (r, g, b, a) = if is_selected {
+                        theme::SELECTED_COLOR
+                    } else {
+                        theme::ITEM_COLOR
+                    };
+                    tiny_skia::Color::from_rgba8(r, g, b, a)
                 };
 
-                if let Some(rect) = tiny_skia::Rect::from_xywh(10.0, y, width as f32 - 20.0, 24.0) {
+                if let Some(rect) = tiny_skia::Rect::from_xywh(
+                    theme::PADDING,
+                    y,
+                    width as f32 - theme::PADDING * 2.0,
+                    theme::ITEM_RECT_HEIGHT,
+                ) {
                     let mut paint = tiny_skia::Paint::default();
                     paint.set_color(rect_color);
                     pixmap.fill_rect(rect, &paint, Transform::identity(), None);
@@ -129,14 +138,14 @@ impl App {
                     draw_text_pixel(
                         &mut pixmap,
                         &self.fonts,
-                        20.0,
-                        y + 2.0, // Center vertically roughly
-                        &title,  // Use combined title
+                        theme::ITEM_TEXT_OFFSET_X,
+                        y + theme::ITEM_TEXT_OFFSET_Y, // Center vertically roughly
+                        &title,                        // Use combined title
                         tiny_skia::Color::WHITE,
                         indices,
                     );
                 }
-                y += 28.0;
+                y += theme::ITEM_HEIGHT;
             }
         }
 

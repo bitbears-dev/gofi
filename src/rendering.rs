@@ -1,6 +1,8 @@
 use ab_glyph::{Font, PxScale, ScaleFont};
 use tiny_skia::PixmapMut;
 
+use crate::theme;
+
 pub fn draw_text_pixel(
     pixmap: &mut PixmapMut,
     fonts: &[ab_glyph::FontVec],
@@ -10,13 +12,13 @@ pub fn draw_text_pixel(
     color: tiny_skia::Color,
     highlights: &[usize], // Add mismatch here
 ) {
-    let scale = PxScale::from(18.0);
+    let scale = PxScale::from(theme::FONT_SIZE);
     // Use the measurement from the first font for simplicity of layout
     // In a real text layout engine, this would be more complex.
     let default_font = &fonts[0];
 
     let mut pen_x = x;
-    let pen_y = y + 18.0; // Baseline
+    let pen_y = y + theme::FONT_SIZE; // Baseline
 
     // Convert color to u8 components (ARGB)
     // Default color
@@ -24,10 +26,8 @@ pub fn draw_text_pixel(
     let g_def = (color.green() * 255.0) as u8;
     let b_def = (color.blue() * 255.0) as u8;
 
-    // Highlight color (Greenish Cyan: 0, 255, 255)
-    let r_hl = 0;
-    let g_hl = 255;
-    let b_hl = 255;
+    // Highlight color
+    let (r_hl, g_hl, b_hl) = theme::HIGHLIGHT_COLOR;
 
     for (char_idx, c) in text.chars().enumerate() {
         if c.is_control() {

@@ -22,6 +22,7 @@ mod handlers;
 mod key_repeat;
 mod rendering;
 mod test_switcher;
+mod theme;
 mod window_switcher;
 
 use app::App;
