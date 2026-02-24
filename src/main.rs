@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use anyhow::{Context, Result};
 use smithay_client_toolkit::reexports::calloop::{
     EventLoop,
     channel::{self},
@@ -30,13 +31,35 @@ use fonts::load_fonts;
 use key_repeat::{KeyRepeat, RepeatCommand};
 use window_switcher::WindowSwitcherState;
 
-fn main() {
-    let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+fn calculate_window_size(output_state: &OutputState) -> (u32, u32) {
+    let default_width = 1024;
+    let default_height = 600;
+
+    if let Some(output) = output_state.outputs().next()
+        && let Some(info) = output_state.info(&output)
+    {
+        if let Some(mode) = info.logical_size {
+            return ((mode.0 as f32 * 0.8) as u32, (mode.1 as f32 * 0.3) as u32);
+        } else if let Some(mode) = info.modes.iter().find(|m| m.current || m.preferred) {
+            return (
+                (mode.dimensions.0 as f32 * 0.8) as u32,
+                (mode.dimensions.1 as f32 * 0.3) as u32,
+            );
+        }
+    }
+
+    (default_width, default_height)
+}
+
+fn main() -> Result<()> {
+    let mut event_loop: EventLoop<App> =
+        EventLoop::try_new().context("Failed to create event loop")?;
     let loop_handle = event_loop.handle();
     let (sender, channel) = channel::channel();
 
-    let conn = Connection::connect_to_env().unwrap();
-    let (globals, mut event_queue) = registry_queue_init::<App>(&conn).unwrap();
+    let conn = Connection::connect_to_env().context("Failed to connect to Wayland display")?;
+    let (globals, mut event_queue) =
+        registry_queue_init::<App>(&conn).context("Failed to initialize registry")?;
     let qh = event_queue.handle();
 
     let shm = Shm::bind(&globals, &qh).expect("shm bind");
@@ -79,23 +102,14 @@ fn main() {
     };
 
     // Roundtrip
-    event_queue.roundtrip(&mut app).unwrap();
-    event_queue.roundtrip(&mut app).unwrap();
+    event_queue
+        .roundtrip(&mut app)
+        .context("Wayland roundtrip failed")?;
+    event_queue
+        .roundtrip(&mut app)
+        .context("Wayland roundtrip failed")?;
 
-    let mut target_width = 1024;
-    let mut target_height = 600;
-
-    if let Some(output) = app.output_state.outputs().next()
-        && let Some(info) = app.output_state.info(&output)
-    {
-        if let Some(mode) = info.logical_size {
-            target_width = (mode.0 as f32 * 0.8) as u32;
-            target_height = (mode.1 as f32 * 0.3) as u32;
-        } else if let Some(mode) = info.modes.iter().find(|m| m.current || m.preferred) {
-            target_width = (mode.dimensions.0 as f32 * 0.8) as u32;
-            target_height = (mode.dimensions.1 as f32 * 0.3) as u32;
-        }
-    }
+    let (target_width, target_height) = calculate_window_size(&app.output_state);
 
     app.width = target_width;
     app.height = target_height;
@@ -114,7 +128,7 @@ fn main() {
 
     WaylandSource::new(conn.clone(), event_queue)
         .insert(loop_handle.clone())
-        .unwrap();
+        .context("Failed to insert Wayland source")?;
 
     // Setup channel for key repeat
     let loop_handle_clone = loop_handle.clone();
@@ -142,7 +156,7 @@ fn main() {
                         let period = if rate > 0 { 1000 / rate as u64 } else { 200 };
                         TimeoutAction::ToDuration(Duration::from_millis(period))
                     })
-                    .unwrap();
+                    .expect("Failed to insert key repeat timer");
 
                 app.current_key_repeat = Some(KeyRepeat { keysym, token });
             }
@@ -156,14 +170,16 @@ fn main() {
             }
             channel::Event::Closed => {}
         })
-        .unwrap();
+        .map_err(|e| anyhow::anyhow!("Failed to insert key repeat channel: {:?}", e))?;
 
     loop {
         event_loop
             .dispatch(Duration::from_millis(16), &mut app)
-            .unwrap();
+            .context("Event loop dispatch failed")?;
         if app.exit {
             break;
         }
     }
+
+    Ok(())
 }

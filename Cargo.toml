@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0"
 smithay-client-toolkit = { version = "0.19", features = ["calloop"] }
 tempfile = "3.25.0"
 wayland-client = "0.31"

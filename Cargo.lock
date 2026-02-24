@@ -337,6 +337,7 @@ name = "gofi"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
+ "anyhow",
  "env_logger",
  "fontdb",
  "fuzzy-matcher",
