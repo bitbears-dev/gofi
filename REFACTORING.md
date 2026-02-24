@@ -86,9 +86,11 @@ fn calculate_window_size(output_state: &OutputState) -> (u32, u32) {
 
 ---
 
-## 6. 🧪 `test_switcher.rs` の改善 (優先度: 低)
+## 6. ✅ ~~`test_switcher.rs` の改善~~ (優先度: 低) — 完了
 
-テストが DBus 依存で実質機能していない。`window_switcher.rs` 内に既にまともなテストがあるため、`test_switcher.rs` は削除するか、モックを使ったテストに書き直す。
+~~テストが DBus 依存で実質機能していない。`window_switcher.rs` 内に既にまともなテストがあるため、`test_switcher.rs` は削除するか、モックを使ったテストに書き直す。~~
+
+`window_switcher.rs` 内に十分なテスト (`test_filter_self_pid`, `test_ensure_visible`, `test_extract_json_from_gdbus`) が存在するため、`test_switcher.rs` を削除済み。
 
 ---
 
