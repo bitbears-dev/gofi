@@ -167,23 +167,23 @@ impl App {
         keysym: Keysym,
         utf8: Option<String>,
     ) {
-        use xkeysym::Keysym;
-
-        if keysym == Keysym::Escape {
-            self.exit = true;
-        } else if keysym == Keysym::Down {
-            self.window_switcher_state.next();
-        } else if keysym == Keysym::Up {
-            self.window_switcher_state.prev();
-        } else if keysym == Keysym::Return {
-            self.window_switcher_state.activate();
-            self.exit = true;
-        } else if keysym == Keysym::BackSpace {
-            self.window_switcher_state.backspace();
-        } else if let Some(text) = utf8
-            && !text.chars().any(|c| c.is_control())
-        {
-            self.window_switcher_state.input_text(&text);
+        match keysym {
+            Keysym::Escape => self.exit = true,
+            Keysym::Down => self.window_switcher_state.next(),
+            Keysym::Up => self.window_switcher_state.prev(),
+            Keysym::Return => {
+                self.window_switcher_state.activate();
+                self.exit = true;
+            }
+            Keysym::BackSpace => self.window_switcher_state.backspace(),
+            _ if utf8
+                .as_ref()
+                .is_some_and(|t| !t.chars().any(|c| c.is_control())) =>
+            {
+                self.window_switcher_state
+                    .input_text(utf8.as_ref().unwrap());
+            }
+            _ => {}
         }
         self.draw(qh);
     }
