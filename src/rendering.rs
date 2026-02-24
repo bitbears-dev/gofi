@@ -3,15 +3,24 @@ use tiny_skia::PixmapMut;
 
 use crate::theme;
 
-pub fn draw_text_pixel(
-    pixmap: &mut PixmapMut,
-    fonts: &[ab_glyph::FontVec],
-    x: f32,
-    y: f32,
-    text: &str,
-    color: tiny_skia::Color,
-    highlights: &[usize], // Add mismatch here
-) {
+pub struct TextDrawParams<'a> {
+    pub fonts: &'a [ab_glyph::FontVec],
+    pub x: f32,
+    pub y: f32,
+    pub text: &'a str,
+    pub color: tiny_skia::Color,
+    pub highlights: &'a [usize],
+}
+
+pub fn draw_text_pixel(pixmap: &mut PixmapMut, params: TextDrawParams) {
+    let TextDrawParams {
+        fonts,
+        x,
+        y,
+        text,
+        color,
+        highlights,
+    } = params;
     let scale = PxScale::from(theme::FONT_SIZE);
     // Use the measurement from the first font for simplicity of layout
     // In a real text layout engine, this would be more complex.

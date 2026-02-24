@@ -94,6 +94,8 @@ fn calculate_window_size(output_state: &OutputState) -> (u32, u32) {
 
 ---
 
-## 7. 🔧 `draw_text_pixel()` の引数の多さ (優先度: 低)
+## 7. 🔧 ~~`draw_text_pixel()` の引数の多さ~~ (優先度: 低) — 完了
 
-7個の引数を `TextDrawParams` のような構造体にまとめて、呼び出し側の可読性を改善する。
+~~7個の引数を `TextDrawParams` のような構造体にまとめて、呼び出し側の可読性を改善する。~~
+
+`TextDrawParams` 構造体を導入し、`fonts`, `x`, `y`, `text`, `color`, `highlights` の6つの読み取り専用パラメータをまとめた。`pixmap` は `&mut` の借用制約のため別引数として残している。

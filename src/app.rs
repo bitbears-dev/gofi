@@ -17,7 +17,7 @@ use wayland_client::{
 use xkeysym::Keysym;
 
 use crate::key_repeat::{KeyRepeat, RepeatCommand};
-use crate::rendering::draw_text_pixel;
+use crate::rendering::{TextDrawParams, draw_text_pixel};
 use crate::theme;
 use crate::window_switcher::WindowSwitcherState;
 
@@ -77,14 +77,17 @@ impl App {
             );
 
             // Draw search query
+            let search_text = format!("Search: {}", self.window_switcher_state.query);
             draw_text_pixel(
                 &mut pixmap,
-                &self.fonts,
-                theme::PADDING,
-                theme::PADDING,
-                &format!("Search: {}", self.window_switcher_state.query),
-                tiny_skia::Color::WHITE,
-                &[], // No highlight for search bar
+                TextDrawParams {
+                    fonts: &self.fonts,
+                    x: theme::PADDING,
+                    y: theme::PADDING,
+                    text: &search_text,
+                    color: tiny_skia::Color::WHITE,
+                    highlights: &[],
+                },
             );
 
             let selection = self.window_switcher_state.selection_index;
@@ -137,12 +140,14 @@ impl App {
                     let title = format!("{} - {}", win.wm_class, win.title); // Show app name + title
                     draw_text_pixel(
                         &mut pixmap,
-                        &self.fonts,
-                        theme::ITEM_TEXT_OFFSET_X,
-                        y + theme::ITEM_TEXT_OFFSET_Y, // Center vertically roughly
-                        &title,                        // Use combined title
-                        tiny_skia::Color::WHITE,
-                        indices,
+                        TextDrawParams {
+                            fonts: &self.fonts,
+                            x: theme::ITEM_TEXT_OFFSET_X,
+                            y: y + theme::ITEM_TEXT_OFFSET_Y,
+                            text: &title,
+                            color: tiny_skia::Color::WHITE,
+                            highlights: indices,
+                        },
                     );
                 }
                 y += theme::ITEM_HEIGHT;
